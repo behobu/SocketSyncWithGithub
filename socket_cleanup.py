@@ -7,61 +7,89 @@
 # Requirements: Python >= 3.10, requests, PyGithub
 ###############################################################################
 
-import os, requests
+import argparse, os, requests
 
 from base64 import b64encode
 from github import Auth
 from github import Github
 
-ghPAT = os.getenv("GH_PAT")
-socketPAT = b64encode((os.getenv("SOCKET_PAT") + ':').encode('utf-8')).decode()
-targetSlug = 'JupiterOne'
+parser = argparse.ArgumentParser(
+    prog='Socket Sync Repos With Github',
+    description='A script that will sync repositories monitored by Socket with active repositories within a GitHub Organization'
+)
+parser.add_argument('-g', '--GithubOrgName', required=True, dest='ghSlug')
+parser.add_argument('-s', '--SocketOrgName', required=True, dest='socketSlug')
 
-ghClient = Github(auth=Auth.Token(ghPAT))
-ghOrg = ghClient.get_organization(targetSlug)
-ghRepoList = []
-print(f'Retrieving list of repositories that belong to the GitHub organization {targetSlug}')
-for repo in ghOrg.get_repos(type = 'all', sort = 'full_name'):
-    ghRepoList.append(repo.name)
-ghClient.close()
-print("Retrieved {} repositories".format(len(ghRepoList)))
 
-socketListReposURL = f'https://api.socket.dev/v0/orgs/{targetSlug}/repos'
-socketParams = {
-    'sort'            : 'created_at', 
-    'direction'       : 'desc', 
-    'per_page'        : 100, 
-    'include_archived': 'false',
-    'page'            : 1
-}
-socketRepoList = []
-socketHeaders = {
-    'accept': 'application/json',
-    'Authorization': f'Basic {socketPAT}'
-}
-socketResponseJSON = {'nextPage': socketParams['page']}
-print('Retrieving list of repositories monitored by Socket')
-while socketResponseJSON['nextPage']:
-    socketResponse = requests.get(socketListReposURL, headers = socketHeaders, params = socketParams)
-    if socketResponse.status_code != 200:
-        exit('Failed to get list of repositories monitored by Socket')
-    else:
-        socketResponseJSON = socketResponse.json()
-        socketRepoList.extend(socketResponseJSON['results'])
-        socketParams['page'] = socketResponseJSON['nextPage']
-print("Retrieved {} repositories".format(len(socketRepoList)))
-socketRepoNameList = [repo['name'] for repo in socketRepoList if not repo['name'].startswith('.')]
-socketRepoNameList.sort()
-socketDeleteRepoURL = 'https://api.socket.dev/v0/orgs/{targetslug}/repos/{reponame}'
-print(f'Deleting repos from Socket that are not active in the {targetSlug} GitHub Organization')
-count = 0
-for repoName in socketRepoNameList:
-    if repoName not in ghRepoList:
-        # if it is, then use the Socket API to delete the repo from Socket
-        response = requests.delete(socketDeleteRepoURL.format(targetslug = targetSlug, reponame = repoName), headers = socketHeaders)
-        if response.status_code != 200:
-            print(f"Error deleting {repoName} from Socket")
+def get_github_repos(targetSlug, patName):
+    if patName not in os.environ:
+        exit("Please set an environment variable named {patName} with the value of your GitHub Personal Access Token and then re-run this script.")
+    ghPAT = os.getenv("GH_PAT")
+    ghClient = Github(auth=Auth.Token(ghPAT))
+    ghOrg = ghClient.get_organization(targetSlug)
+    ghRepoList = []
+    print(f'Retrieving list of repositories that belong to the GitHub organization {targetSlug}')
+    for repo in ghOrg.get_repos(type = 'all', sort = 'full_name'):
+        ghRepoList.append(repo.name)
+    ghClient.close()
+    print("Retrieved {} repositories".format(len(ghRepoList)))
+
+def get_socket_repos(targetSlug, patName):
+    if patName not in os.environ:
+        exit("Please set an environment variable named {patName} with the value of your Socket Personal Access Token and then re-run this script.")
+    socketPAT = b64encode((os.getenv(patName) + ':').encode('utf-8')).decode()
+    socketListReposURL = f'https://api.socket.dev/v0/orgs/{targetSlug}/repos'
+    socketParams = {
+        'sort'            : 'created_at', 
+        'direction'       : 'desc', 
+        'per_page'        : 100, 
+        'include_archived': 'false',
+        'page'            : 1
+    }
+    socketRepoList = []
+    socketHeaders = {
+        'accept': 'application/json',
+        'Authorization': f'Basic {socketPAT}'
+    }
+    socketResponseJSON = {'nextPage': socketParams['page']}
+    print('Retrieving list of repositories monitored by Socket')
+    while socketResponseJSON['nextPage']:
+        socketResponse = requests.get(socketListReposURL, headers = socketHeaders, params = socketParams)
+        if socketResponse.status_code != 200:
+            exit('Failed to get list of repositories monitored by Socket')
         else:
-            print(f"{repoName} successfully deleted from Socket")
-            count += 1
-print(f"Deleted {count} repositories from Socket")
+            socketResponseJSON = socketResponse.json()
+            socketRepoList.extend(socketResponseJSON['results'])
+            socketParams['page'] = socketResponseJSON['nextPage']
+    print("Retrieved {} repositories".format(len(socketRepoList)))
+    socketRepoNameList = [repo['name'] for repo in socketRepoList if not repo['name'].startswith('.')]
+    socketRepoNameList.sort()
+
+def compare_and_remove(ghRepoList, socketRepoList, githubSlug, socketSlug, patName):
+    if patName not in os.environ:
+        exit(f"Please set an environment variable named {patName} with the value of your Socket Personal Access Token and then re-run this script.")
+    socketPAT = b64encode((os.getenv(patName) + ':').encode('utf-8')).decode()
+    socketHeaders = {
+        'accept': 'application/json',
+        'Authorization': f'Basic {socketPAT}'
+    }
+    socketDeleteRepoURL = 'https://api.socket.dev/v0/orgs/{targetslug}/repos/{reponame}'
+    print(f'Deleting repos from Socket that are not active in the {githubSlug} GitHub Organization')
+    count = 0
+    for repoName in socketRepoList:
+        if repoName not in ghRepoList:
+            # if it is, then use the Socket API to delete the repo from Socket
+            response = requests.delete(socketDeleteRepoURL.format(targetslug = socketSlug, reponame = repoName), headers = socketHeaders)
+            if response.status_code != 200:
+                print(f"Error deleting {repoName} from Socket")
+            else:
+                #print(f"{repoName} successfully deleted from Socket")
+                count += 1
+    print(f"Deleted {count} repositories from Socket")
+
+
+if __name__ == '__main__':
+    args = parser.parse_args()
+    ghRepoList = get_github_repos(args.ghSlug)
+    socketRepoList = get_socket_repos(args.socketSlug)
+    compare_and_remove(ghRepoList, socketRepoList, args.socketSlug)
